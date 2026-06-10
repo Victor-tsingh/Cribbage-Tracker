@@ -1,8 +1,10 @@
 // Cribbage board client logic
 const COLORS = ['#cc2222', '#2255cc'];
 const COLORS_LIGHT = ['#f4b3b3', '#aac4f0'];
+const COLORS_DARK = ['#8e1414', '#163a8e'];
 
 let state = window.INITIAL_STATE;
+let prevScores = state.scores.slice();   // for detecting the 69 moment
 
 function $(sel) { return document.querySelector(sel); }
 function $$(sel) { return document.querySelectorAll(sel); }
@@ -127,6 +129,13 @@ function drawBoard() {
   const HOLES = 60;            // visual holes along the track
   let html = '';
 
+  // Drop shadow used by the pegs so they sit *on* the board.
+  html += `<defs>
+    <filter id="peg-shadow" x="-60%" y="-60%" width="220%" height="220%">
+      <feDropShadow dx="0" dy="1.2" stdDeviation="1.1" flood-color="#000" flood-opacity="0.45"/>
+    </filter>
+  </defs>`;
+
   // Draw the lane "ribbons" — a colored stroke following the centerline, offset per player.
   // We approximate each lane as a polyline of sampled points.
   function lanePath(off) {
@@ -141,7 +150,7 @@ function drawBoard() {
   }
 
   // Lane channels: a dark base stroke (the carved groove) under a colored ribbon on top.
-  // Player 0 (purple) and player 1 (green) lanes, each offset from the centerline.
+  // Player 0 (red) and player 1 (blue) lanes, each offset from the centerline.
   const laneW = 15;
 
   // Dark groove base for both lanes (gives a recessed look)
@@ -186,24 +195,38 @@ function drawBoard() {
   const lx = sp.x + sp.nx * (reach + 9), ly = sp.y + sp.ny * (reach + 9);
   html += `<text x="${lx.toFixed(1)}" y="${(ly + 4).toFixed(1)}" font-size="12" font-weight="700" fill="#000000" text-anchor="middle">S</text>`;
 
-  // Pegs — back peg (previous score, lighter) and front peg (current, solid)
+  // Pegs — back peg (previous score, hollow) and front peg (current, bold).
+  // Front peg: drop shadow + dark rim in the player's own hue + glossy highlight,
+  // so it reads as a solid colored peg standing in the hole.
   for (let p = 0; p < 2; p++) {
     const prev = getPrevScore(p);
     const curr = state.scores[p];
 
     if (prev > 0) {
       const c = positionToCoord(prev, p, track);
-      html += pegSvg(c.x, c.y, COLORS_LIGHT[p], COLORS[p], 4.2);
+      html += backPegSvg(c.x, c.y, p);
     }
     const c = positionToCoord(curr, p, track);
-    html += pegSvg(c.x, c.y, COLORS[p], '#ffffff', 5);
+    html += frontPegSvg(c.x, c.y, p);
   }
 
   $('#board').innerHTML = html;
 }
 
-function pegSvg(x, y, fill, stroke, r) {
-  return `<circle cx="${x.toFixed(1)}" cy="${y.toFixed(1)}" r="${r}" fill="${fill}" stroke="${stroke}" stroke-width="1.5"/>`;
+function backPegSvg(x, y, p) {
+  // Hollow ring in the player's color — clearly secondary to the front peg.
+  return `<circle cx="${x.toFixed(1)}" cy="${y.toFixed(1)}" r="4"
+            fill="${COLORS_LIGHT[p]}" stroke="${COLORS[p]}" stroke-width="1.6" opacity="0.9"/>`;
+}
+
+function frontPegSvg(x, y, p) {
+  const X = x.toFixed(1), Y = y.toFixed(1);
+  return `<g filter="url(#peg-shadow)">
+      <circle cx="${X}" cy="${Y}" r="6.4" fill="${COLORS[p]}"
+              stroke="${COLORS_DARK[p]}" stroke-width="2"/>
+      <circle cx="${(x - 1.8).toFixed(1)}" cy="${(y - 1.8).toFixed(1)}" r="1.7"
+              fill="#ffffff" opacity="0.7"/>
+    </g>`;
 }
 
 function renderScores() {
@@ -212,20 +235,52 @@ function renderScores() {
     el.textContent = state.scores[p];
   });
   $$('.target-display').forEach(el => el.textContent = state.target);
+
+  // Lead badge: show "leads by N" on the leading player's card.
+  const diff = state.scores[0] - state.scores[1];
+  $$('.lead-badge').forEach(el => {
+    const p = parseInt(el.dataset.player);
+    const lead = p === 0 ? diff : -diff;
+    if (lead > 0 && !state.winner) {
+      el.textContent = `leads by ${lead}`;
+      el.classList.remove('hidden');
+    } else {
+      el.classList.add('hidden');
+    }
+  });
+}
+
+function renderDealer() {
+  $$('.dealer-chip').forEach(el => {
+    const p = parseInt(el.dataset.player);
+    el.classList.toggle('active', state.dealer === p);
+    el.textContent = state.dealer === p ? 'Dealer' : 'Set dealer';
+  });
 }
 
 function renderWinner() {
   const banner = $('#winner-banner');
   if (state.winner) {
     const w = state.winner;
-    let msg = `${w.name} wins ${state.scores[w.player]}–${w.loser_score}`;
-    if (w.status === 'skunk') msg += ' — skunk!';
-    if (w.status === 'double_skunk') msg += ' — double skunk!';
+    let msg;
+    if (w.status === 'abiha') {
+      const loser = state.names[1 - w.player];
+      msg = `${loser} entered a forbidden name and loses instantly. ${w.name} wins!`;
+    } else {
+      msg = `${w.name} wins ${state.scores[w.player]}\u2013${w.loser_score}`;
+      if (w.status === 'skunk') msg += ' — skunk!';
+      if (w.status === 'double_skunk') msg += ' — double skunk!';
+    }
     banner.textContent = msg;
     banner.classList.remove('hidden');
   } else {
     banner.classList.add('hidden');
   }
+  // Lock the pegging controls once the game is over.
+  document.body.classList.toggle('game-over', !!state.winner);
+  $$('.peg-btn, .custom-btn, .custom-input').forEach(el => {
+    el.disabled = !!state.winner;
+  });
 }
 
 function renderHistory() {
@@ -239,17 +294,35 @@ function renderHistory() {
     return `<div class="history-item">
       <span class="who p${h.player}">${escapeText(state.names[h.player])}</span>
       <span>${sign}${h.points}</span>
-      <span style="color:#999;">→ ${h.after}</span>
-      <span style="color:#bbb; margin-left:auto;">${h.time || ''}</span>
+      <span class="hist-after">→ ${h.after}</span>
+      <span class="hist-time">${h.time || ''}</span>
     </div>`;
   }).join('');
 }
 
+// The 69 moment: a small "nice" toast pops up over the score, then fades.
+function checkNice() {
+  for (let p = 0; p < 2; p++) {
+    if (state.scores[p] === 69 && prevScores[p] !== 69) {
+      const card = document.querySelector(`.player-card[data-player="${p}"]`);
+      if (!card) continue;
+      const toast = document.createElement('div');
+      toast.className = 'nice-toast';
+      toast.textContent = 'nice';
+      card.appendChild(toast);
+      setTimeout(() => toast.remove(), 1400);
+    }
+  }
+  prevScores = state.scores.slice();
+}
+
 function render() {
   renderScores();
+  renderDealer();
   renderWinner();
   renderHistory();
   drawBoard();
+  checkNice();
 }
 
 // Wire up events
@@ -262,30 +335,23 @@ $$('.peg-btn').forEach(btn => {
   });
 });
 
+async function submitCustom(player) {
+  const input = document.querySelector(`.custom-input[data-player="${player}"]`);
+  const v = parseInt(input.value);
+  if (!isNaN(v)) {
+    state = await api('/api/peg', { player, points: v });
+    input.value = '';
+    render();
+  }
+}
+
 $$('.custom-btn').forEach(btn => {
-  btn.addEventListener('click', async () => {
-    const player = parseInt(btn.dataset.player);
-    const input = document.querySelector(`.custom-input[data-player="${player}"]`);
-    const v = parseInt(input.value);
-    if (!isNaN(v)) {
-      state = await api('/api/peg', { player, points: v });
-      input.value = '';
-      render();
-    }
-  });
+  btn.addEventListener('click', () => submitCustom(parseInt(btn.dataset.player)));
 });
 
 $$('.custom-input').forEach(input => {
-  input.addEventListener('keydown', async e => {
-    if (e.key === 'Enter') {
-      const player = parseInt(input.dataset.player);
-      const v = parseInt(input.value);
-      if (!isNaN(v)) {
-        state = await api('/api/peg', { player, points: v });
-        input.value = '';
-        render();
-      }
-    }
+  input.addEventListener('keydown', e => {
+    if (e.key === 'Enter') submitCustom(parseInt(input.dataset.player));
   });
 });
 
@@ -299,6 +365,14 @@ $$('.player-name').forEach(input => {
       state = await api('/api/names', body);
       render();
     }, 300);
+  });
+});
+
+$$('.dealer-chip').forEach(chip => {
+  chip.addEventListener('click', async () => {
+    const dealer = parseInt(chip.dataset.player);
+    state = await api('/api/dealer', { dealer });
+    render();
   });
 });
 
