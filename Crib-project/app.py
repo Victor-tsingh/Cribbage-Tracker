@@ -1,12 +1,3 @@
-"""
-Cribbage Score Tracker — Flask web app.
-
-Run with:
-    pip install flask
-    python app.py
-
-Then visit http://localhost:5000
-"""
 from flask import Flask, render_template, request, jsonify, session
 from datetime import datetime
 import os
