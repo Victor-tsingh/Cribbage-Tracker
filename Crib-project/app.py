@@ -14,8 +14,11 @@ import os
 app = Flask(__name__)
 app.secret_key = os.environ.get("SECRET_KEY", "dev-secret-key-change-in-prod")
 
+# Names that trigger an instant loss (case-insensitive, whitespace-trimmed).
+FORBIDDEN_NAMES = {"abiha", "abi"}
 
-def new_game(target=121, names=None):
+
+def new_game(target=121, names=None, dealer=0):
     """Initialize a fresh game state."""
     if names is None:
         names = ["Player 1", "Player 2"]
@@ -23,7 +26,8 @@ def new_game(target=121, names=None):
         "target": target,
         "names": names,
         "scores": [0, 0],
-        "history": [],  # list of {player, points, before, after, time}
+        "dealer": dealer,          # whose crib it is (0 or 1)
+        "history": [],             # list of {player, points, before, after, time}
         "winner": None,
     }
 
@@ -46,8 +50,8 @@ def check_winner(game):
     for i, score in enumerate(game["scores"]):
         if score >= target:
             loser_score = game["scores"][1 - i]
-            skunk_line = target * 3 // 4  # 90 for 121, ~45 for 61
-            double_skunk_line = target // 2  # 60 for 121, 30 for 61
+            skunk_line = target * 3 // 4        # 90 for 121, ~45 for 61
+            double_skunk_line = target // 2     # 60 for 121, 30 for 61
             if loser_score < double_skunk_line:
                 status = "double_skunk"
             elif loser_score < skunk_line:
@@ -62,6 +66,35 @@ def check_winner(game):
             }
             return
     game["winner"] = None
+
+
+def check_forbidden_names(game):
+    """The Abiha rule: entering a forbidden name is an instant loss.
+
+    If a player's name matches, the *other* player wins on the spot.
+    Runs after name changes and after resets (so the rule re-fires if
+    the name is still forbidden when a new game starts). Renaming away
+    from a forbidden name lifts the curse — but only an abiha loss;
+    a game won on points stays won.
+    """
+    any_forbidden = any(
+        n.strip().lower() in FORBIDDEN_NAMES for n in game["names"])
+    winner = game.get("winner")
+    if winner and winner["status"] == "abiha" and not any_forbidden:
+        game["winner"] = None
+        return
+    if winner:
+        return
+    for i, name in enumerate(game["names"]):
+        if name.strip().lower() in FORBIDDEN_NAMES:
+            other = 1 - i
+            game["winner"] = {
+                "player": other,
+                "name": game["names"][other],
+                "status": "abiha",
+                "loser_score": game["scores"][i],
+            }
+            return
 
 
 @app.route("/")
@@ -129,7 +162,13 @@ def api_reset():
     if target not in (61, 121):
         target = 121
     game = get_game()
-    new = new_game(target=target, names=game["names"])
+    # Loser of the last game traditionally deals first; otherwise alternate.
+    if game.get("winner") and game["winner"]["status"] != "abiha":
+        next_dealer = 1 - game["winner"]["player"]
+    else:
+        next_dealer = 1 - game.get("dealer", 0)
+    new = new_game(target=target, names=game["names"], dealer=next_dealer)
+    check_forbidden_names(new)
     save_game(new)
     return jsonify(new)
 
@@ -142,6 +181,18 @@ def api_names():
         game["names"][0] = (data["player1"] or "Player 1").strip()[:30]
     if "player2" in data:
         game["names"][1] = (data["player2"] or "Player 2").strip()[:30]
+    check_forbidden_names(game)
+    save_game(game)
+    return jsonify(game)
+
+
+@app.route("/api/dealer", methods=["POST"])
+def api_dealer():
+    data = request.get_json() or {}
+    game = get_game()
+    dealer = int(data.get("dealer", game.get("dealer", 0)))
+    if dealer in (0, 1):
+        game["dealer"] = dealer
     save_game(game)
     return jsonify(game)
 
@@ -149,4 +200,3 @@ def api_names():
 if __name__ == "__main__":
     port = int(os.environ.get("PORT", 5000))
     app.run(host="0.0.0.0", port=port)
- 
