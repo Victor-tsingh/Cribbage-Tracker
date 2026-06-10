@@ -1,4 +1,3 @@
-// Cribbage board client logic
 const COLORS = ['#cc2222', '#2255cc'];
 const COLORS_LIGHT = ['#f4b3b3', '#aac4f0'];
 const COLORS_DARK = ['#8e1414', '#163a8e'];
@@ -108,14 +107,38 @@ function pointAtDistance(track, d) {
   return { x: last.x2, y: last.y2, nx: 0, ny: 1 };
 }
 
+// ---- Score → distance mapping with grouped holes ----
+// Real cribbage boards cluster holes in groups of 5 with a gap between
+// groups. We map each point to "units" along the track: 1 unit per point,
+// plus a GROUP_GAP unit inserted after every 5th hole. Both the holes and
+// the pegs use this same mapping, so pegs always sit in their hole.
+const GROUP_GAP = 1.0;
+
+function scoreToUnits(s) {
+  if (s <= 0) return 0;
+  return s + GROUP_GAP * Math.floor((s - 1) / 5);
+}
+
+function scoreToDistance(score, track) {
+  const clamped = Math.max(0, Math.min(score, state.target));
+  return (scoreToUnits(clamped) / scoreToUnits(state.target)) * track.total;
+}
+
 // Get screen coordinate for a player's peg at a given score.
 function positionToCoord(score, playerIdx, track) {
-  const target = state.target;
   const off = (playerIdx === 0 ? -1 : 1) * BOARD.laneOffset;
-  const clamped = Math.max(0, Math.min(score, target));
-  const d = (clamped / target) * track.total;
+  const d = scoreToDistance(score, track);
   const p = pointAtDistance(track, d);
   return { x: p.x + p.nx * off, y: p.y + p.ny * off };
+}
+
+// Place a label on whichever side of the track is closer to the board's
+// vertical center, so text never hangs off the top or bottom edge.
+function labelSide(p, reach) {
+  const midY = BOARD.topY + ((BOARD.rows - 1) * BOARD.laneGap) / 2;
+  const a = { x: p.x + p.nx * reach, y: p.y + p.ny * reach };
+  const b = { x: p.x - p.nx * reach, y: p.y - p.ny * reach };
+  return Math.abs(a.y - midY) <= Math.abs(b.y - midY) ? a : b;
 }
 
 function escapeText(s) {
@@ -126,8 +149,13 @@ function escapeText(s) {
 
 function drawBoard() {
   const track = buildCenterline();
-  const HOLES = 60;            // visual holes along the track
   let html = '';
+
+  // Tighten the visible area to hug the track (less empty wood).
+  const pad = 26;
+  const top = BOARD.topY - pad;
+  const bottom = BOARD.topY + (BOARD.rows - 1) * BOARD.laneGap + pad;
+  $('#board').setAttribute('viewBox', `0 ${top} ${BOARD.W} ${bottom - top}`);
 
   // Drop shadow used by the pegs so they sit *on* the board.
   html += `<defs>
@@ -161,39 +189,48 @@ function drawBoard() {
   html += `<path d="${lanePath(-BOARD.laneOffset)}" fill="none" stroke="${COLORS_LIGHT[0]}" stroke-width="${laneW}" stroke-linecap="round" stroke-linejoin="round"/>`;
   html += `<path d="${lanePath(BOARD.laneOffset)}" fill="none" stroke="${COLORS_LIGHT[1]}" stroke-width="${laneW}" stroke-linecap="round" stroke-linejoin="round"/>`;
 
-  // Holes for each player's lane — recessed look: dark dot with a faint light ring
+  // One hole per point (1..target-1), grouped in fives by the unit mapping.
   for (let p = 0; p < 2; p++) {
     const off = (p === 0 ? -1 : 1) * BOARD.laneOffset;
-    for (let h = 0; h <= HOLES; h++) {
-      const d = (h / HOLES) * track.total;
-      const pt = pointAtDistance(track, d);
+    for (let sc = 1; sc < state.target; sc++) {
+      const pt = pointAtDistance(track, scoreToDistance(sc, track));
       const x = pt.x + pt.nx * off;
       const y = pt.y + pt.ny * off;
-      html += `<circle cx="${x.toFixed(1)}" cy="${y.toFixed(1)}" r="2.1" fill="#2e2113"/>`;
+      html += `<circle cx="${x.toFixed(1)}" cy="${y.toFixed(1)}" r="1.9" fill="#2e2113"/>`;
     }
   }
 
-  // Start markers (S) and finish hole at the end of the track
+  // Start marker (S) and finish hole at the end of the track
   const startP = pointAtDistance(track, 0);
   const endP = pointAtDistance(track, track.total);
-  html += `<text x="${startP.x - 14}" y="${startP.y + 4}" font-size="11" font-weight="600" fill="#5a4632">S</text>`;
+  html += `<text x="${(startP.x - 16).toFixed(1)}" y="${(startP.y + 4).toFixed(1)}" font-size="11" font-weight="600" fill="#5a4632" text-anchor="middle">S</text>`;
   for (let p = 0; p < 2; p++) {
     const off = (p === 0 ? -1 : 1) * BOARD.laneOffset;
     html += `<circle cx="${(endP.x + endP.nx * off).toFixed(1)}" cy="${(endP.y + endP.ny * off).toFixed(1)}" r="3.6" fill="none" stroke="${COLORS[p]}" stroke-width="1.5"/>`;
   }
-  html += `<text x="${endP.x + 16}" y="${endP.y + 4}" font-size="11" font-weight="600" fill="#5a4632">${state.target}</text>`;
+  html += `<text x="${(endP.x + 18).toFixed(1)}" y="${(endP.y + 4).toFixed(1)}" font-size="11" font-weight="600" fill="#5a4632">${state.target}</text>`;
 
-  // Skunk line — at 3/4 of the target, drawn black across both lanes with an "S" beside it
-  const skunkScore = Math.floor(state.target * 3 / 4);
-  const skunkD = (skunkScore / state.target) * track.total;
-  const sp = pointAtDistance(track, skunkD);
+  // Milestone ticks (quiet, wood-toned) with small number labels.
+  const milestones = state.target === 121 ? [30, 60] : [15, 30];
   const reach = BOARD.laneOffset + 9; // extend just past both lanes
+  for (const m of milestones) {
+    const mp = pointAtDistance(track, scoreToDistance(m, track));
+    const x1 = mp.x + mp.nx * reach, y1 = mp.y + mp.ny * reach;
+    const x2 = mp.x - mp.nx * reach, y2 = mp.y - mp.ny * reach;
+    html += `<line x1="${x1.toFixed(1)}" y1="${y1.toFixed(1)}" x2="${x2.toFixed(1)}" y2="${y2.toFixed(1)}" stroke="#8a6a45" stroke-width="1.2"/>`;
+    const lp = labelSide(mp, reach + 11);
+    html += `<text x="${lp.x.toFixed(1)}" y="${(lp.y + 3.5).toFixed(1)}" font-size="10" font-weight="600" fill="#7a5c3c" text-anchor="middle">${m}</text>`;
+  }
+
+  // Skunk line — at 3/4 of the target, bold black across both lanes,
+  // labeled with its score on the inward side so it never clips the board.
+  const skunkScore = Math.floor(state.target * 3 / 4);
+  const sp = pointAtDistance(track, scoreToDistance(skunkScore, track));
   const sx1 = sp.x + sp.nx * reach, sy1 = sp.y + sp.ny * reach;
   const sx2 = sp.x - sp.nx * reach, sy2 = sp.y - sp.ny * reach;
-  html += `<line x1="${sx1.toFixed(1)}" y1="${sy1.toFixed(1)}" x2="${sx2.toFixed(1)}" y2="${sy2.toFixed(1)}" stroke="#000000" stroke-width="2"/>`;
-  // "S" label just outside the line, offset along the normal
-  const lx = sp.x + sp.nx * (reach + 9), ly = sp.y + sp.ny * (reach + 9);
-  html += `<text x="${lx.toFixed(1)}" y="${(ly + 4).toFixed(1)}" font-size="12" font-weight="700" fill="#000000" text-anchor="middle">S</text>`;
+  html += `<line x1="${sx1.toFixed(1)}" y1="${sy1.toFixed(1)}" x2="${sx2.toFixed(1)}" y2="${sy2.toFixed(1)}" stroke="#000000" stroke-width="2.5"/>`;
+  const slp = labelSide(sp, reach + 11);
+  html += `<text x="${slp.x.toFixed(1)}" y="${(slp.y + 3.5).toFixed(1)}" font-size="10" font-weight="700" fill="#000000" text-anchor="middle">${skunkScore}</text>`;
 
   // Pegs — back peg (previous score, hollow) and front peg (current, bold).
   // Front peg: drop shadow + dark rim in the player's own hue + glossy highlight,
